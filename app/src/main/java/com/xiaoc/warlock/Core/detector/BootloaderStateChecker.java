@@ -7,12 +7,14 @@ import android.security.keystore.KeyProperties;
 import android.util.Log;
 
 import org.bouncycastle.asn1.ASN1Encodable;
+import org.bouncycastle.asn1.ASN1Enumerated;
 import org.bouncycastle.asn1.ASN1InputStream;
 import org.bouncycastle.asn1.ASN1Integer;
 import org.bouncycastle.asn1.ASN1OctetString;
 import org.bouncycastle.asn1.ASN1Primitive;
 import org.bouncycastle.asn1.ASN1Sequence;
 import org.bouncycastle.asn1.ASN1Boolean;
+import org.bouncycastle.asn1.ASN1TaggedObject;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 
 import java.io.ByteArrayInputStream;
@@ -506,43 +508,75 @@ public class BootloaderStateChecker {
         }
     }
 
+    // 修复后的 findRootOfTrustInAuthList 方法
     private static RootOfTrust findRootOfTrustInAuthList(ASN1Sequence authList) {
         try {
-            // 遍历查找Root of Trust标签
             for (int i = 0; i < authList.size(); i++) {
                 ASN1Encodable item = authList.getObjectAt(i);
-                if (!(item instanceof ASN1Sequence)) continue;
+                if (!(item instanceof ASN1TaggedObject)) continue; // 应该是 TaggedObject
 
-                ASN1Sequence taggedItem = (ASN1Sequence) item;
-                if (taggedItem.size() < 2) continue;
+                ASN1TaggedObject taggedItem = (ASN1TaggedObject) item;
+                int tagNo = taggedItem.getTagNo();
 
-                // 检查标签值
-                ASN1Encodable tagValue = taggedItem.getObjectAt(0);
-                if (tagValue instanceof ASN1Integer) {
-                    long tag = ((ASN1Integer) tagValue).getValue().longValue();
-
-                    // 通常是702，但为了兼容不同设备，也尝试检查其他结构
-                    if (tag == 702) {
-                        RootOfTrust rootOfTrust = parseRootOfTrustValue(taggedItem.getObjectAt(1));
-                        if (rootOfTrust != null) {
-                            return rootOfTrust;
+                // 修正：RootOfTrust 的 Tag 是 704
+                if (tagNo == 704) {
+                    // RootOfTrust 是 SEQUENCE，通常是 EXPLICIT tagging
+                    // 需要根据 BouncyCastle 版本适配，这里假设是 standard explicit
+                    ASN1Encodable object = taggedItem.getObject();
+                    if (object instanceof ASN1Sequence) {
+                        return parseKeyAttestationSequenceRaw((ASN1Sequence) object);
+                    }
+                    // 有些版本可能是 OctetString 包装的 Sequence
+                    if (object instanceof ASN1OctetString) {
+                        try (ASN1InputStream is = new ASN1InputStream(((ASN1OctetString) object).getOctets())) {
+                            ASN1Primitive seq = is.readObject();
+                            if (seq instanceof ASN1Sequence) {
+                                return parseKeyAttestationSequenceRaw((ASN1Sequence) seq);
+                            }
                         }
                     }
                 }
-
-                // 可能不使用标签而是直接内嵌
-                if (taggedItem.size() >= 3) {
-                    // 尝试解析看是否符合Root of Trust结构
-                    RootOfTrust potentialRot = parseDirectSequence(taggedItem);
-                    if (potentialRot != null) {
-                        return potentialRot;
-                    }
-                }
             }
-
             return null;
         } catch (Exception e) {
-            Log.e(TAG, "在授权列表中查找Root of Trust时出错", e);
+            Log.e(TAG, "解析授权列表出错", e);
+            return null;
+        }
+    }
+
+    // 对应上面调用的解析方法
+    private static RootOfTrust parseKeyAttestationSequenceRaw(ASN1Sequence rootOfTrustSeq) {
+        try {
+            // RootOfTrust结构:
+            // verifiedBootKey [0] OCTET_STRING
+            // deviceLocked [1] BOOLEAN
+            // verifiedBootState [2] ENUMERATED
+            // verifiedBootHash [3] OCTET_STRING
+
+            if (rootOfTrustSeq.size() < 3) return null;
+
+            boolean deviceLocked = false;
+            int verifiedBootState = 0;
+
+            // BouncyCastle 解析 Sequence
+            // 注意：ASN1Sequence 的顺序是固定的，不需要按 Tag 查找
+
+            // Index 1: deviceLocked
+            ASN1Encodable lockedObj = rootOfTrustSeq.getObjectAt(1);
+            if (lockedObj instanceof ASN1Boolean) {
+                deviceLocked = ((ASN1Boolean) lockedObj).isTrue();
+            }
+
+            // Index 2: verifiedBootState
+            ASN1Encodable stateObj = rootOfTrustSeq.getObjectAt(2);
+            if (stateObj instanceof ASN1Enumerated) { // 通常是 Enumerated
+                verifiedBootState = ((ASN1Enumerated) stateObj).getValue().intValue();
+            } else if (stateObj instanceof ASN1Integer) {
+                verifiedBootState = ((ASN1Integer) stateObj).getValue().intValue();
+            }
+
+            return new RootOfTrust(deviceLocked, verifiedBootState);
+        } catch (Exception e) {
             return null;
         }
     }

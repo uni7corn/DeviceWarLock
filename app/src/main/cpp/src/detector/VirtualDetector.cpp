@@ -10,7 +10,7 @@ const std::string VirtualDetector::CHECK_ARM_REGISTERS = "checkArmRegisters_nati
 void VirtualDetector::detect(JNIEnv* env, jobject callback) {
     detectArch(env, callback);
     detectThermal(env, callback);
-    detectArmRegisters(env, callback);  // 添加ARM寄存器检测
+    //detectArmRegisters(env, callback);  // 添加ARM寄存器检测
 
     if (MiscUtil::SystemUtils::getSDKLevel() > __ANDROID_API_Q__) {
         detectProcess(env, callback);

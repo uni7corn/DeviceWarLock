@@ -259,43 +259,55 @@ void SystemDetector::checkKsu(JNIEnv* env, jobject callback) {
     }
 
 }
+#include <unistd.h>
+#include <sys/stat.h>
+
 void SystemDetector::checkPty(JNIEnv* env, jobject callback) {
-    LOGI("Starting pty permission check");
+    LOGI("Starting pty check (isatty method)");
 
-    int master_fd = posix_openpt(O_RDWR | O_NOCTTY);
-    if (master_fd < 0) {
-        // 失败不报，直接返回
-        return;
+    bool isSuspicious = false;
+    std::string reason;
+
+    // 方法1: 检查标准输入/输出/错误是否关联终端
+    // 正常的 Android App (启动自 Launcher) 这些 fd 通常指向 /dev/null 或 logcat 管道，而不是 tty
+    if (isatty(STDIN_FILENO) || isatty(STDOUT_FILENO) || isatty(STDERR_FILENO)) {
+        isSuspicious = true;
+        reason = "Process connected to a terminal (isatty)";
     }
 
-    if (grantpt(master_fd) != 0) {
-        close(master_fd);
-        return;
+    // 方法2: 深度检查 /proc/self/fd 下的文件指向
+    if (!isSuspicious) {
+        char linkPath[256];
+        char targetPath[256];
+
+        // 检查常见的前3个 fd
+        for (int i = 0; i <= 2; i++) {
+            snprintf(linkPath, sizeof(linkPath), "/proc/self/fd/%d", i);
+            ssize_t len = readlink(linkPath, targetPath, sizeof(targetPath) - 1);
+            if (len != -1) {
+                targetPath[len] = '\0';
+                // 如果指向 /dev/pts/xxx，说明被 Shell/终端 控制
+                if (strstr(targetPath, "/dev/pts/") != nullptr) {
+                    isSuspicious = true;
+                    reason = "Standard FD points to PTY: ";
+                    reason += targetPath;
+                    break;
+                }
+            }
+        }
     }
 
-    if (unlockpt(master_fd) != 0) {
-        close(master_fd);
-        return;
+    if (isSuspicious) {
+        LOGI("Suspicious PTY environment detected: %s", reason.c_str());
+        DetectorUtils::reportWarning(
+                env,
+                callback,
+                CHECK_PTY,
+                DetectorUtils::LEVEL_MEDIUM,
+                reason
+        );
+    } else {
+        LOGI("PTY check passed (Normal environment)");
     }
-
-    const char* slave_name = ptsname(master_fd);
-    if (slave_name == nullptr) {
-        close(master_fd);
-        return;
-    }
-
-    std::string result = "pty opened successfully. slave device: ";
-    result += slave_name;
-    LOGI("%s", result.c_str());
-
-    DetectorUtils::reportWarning(
-            env,
-            callback,
-            CHECK_PTY,
-            DetectorUtils::LEVEL_MEDIUM,
-            result
-    );
-
-    close(master_fd);
 }
 
